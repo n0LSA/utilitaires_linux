@@ -1,0 +1,34 @@
+- import_playbook: debian_install_docker.yml
+  name: Installing Docker
+- hosts: debian_v1
+  name: Installing docker compose
+  tasks:
+    - name: Check if Docker Compose is installed
+      become: yes
+      command: docker-compose -v
+      register: docker_compose_installed
+      ignore_errors: true
+
+    - name: Install Docker Compose
+      become: yes
+      block: 
+        - name: Remove old docker compose package
+          ansible.builtin.apt:
+            name: docker-compose 
+            state: absent
+          ignore_errors: true
+        - name: Get latest Docker Compose version
+          uri:
+            url: https://api.github.com/repos/docker/compose/releases/latest
+            return_content: yes
+          register: docker_compose_version
+        - name: Extract Docker Compose version number
+          set_fact:
+            docker_compose_version_number: "{{ docker_compose_version.json.tag_name }}"
+        - name: Get Docker Compose based on version number
+          become: yes
+          ansible.builtin.get_url:
+            url: https://github.com/docker/compose/releases/download/{{ docker_compose_version_number }}/docker-compose-Linux-x86_64
+            dest: /usr/bin/docker-compose
+            mode: '0755'
+      when: docker_compose_installed.failed

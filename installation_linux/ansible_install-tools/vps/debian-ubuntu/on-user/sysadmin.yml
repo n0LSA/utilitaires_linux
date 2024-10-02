@@ -1,0 +1,393 @@
+---
+- name: Configuration du serveur VPS
+  hosts: VM_DEB12_ADRIEN_22
+  become: true
+  vars:
+    user_home: "/home/{{ ansible_user }}"
+    ssh_port: 49166
+    allowed_ssh_ips:
+      - 77.201.168.90
+      - 82.64.31.31
+    sshd_config_settings:
+      Port: "{{ ssh_port }}"
+      SyslogFacility: AUTH
+      LogLevel: INFO
+      PermitRootLogin: "no"
+      PubkeyAuthentication: "yes"
+      PasswordAuthentication: "no"
+    ufw_allowed_ports:
+      - { port: 80, proto: 'tcp', from: 'any' }
+      - { port: 443, proto: 'tcp', from: 'any' }
+      - { port: 6881, proto: 'tcp', from: 'any' }
+      - { port: 6881, proto: 'udp', from: 'any' }
+    timezone: "Europe/Paris"
+    locales:
+      - "fr_FR.UTF-8"
+
+  tasks:
+    - name: Échec si ce n'est pas une architecture x86_64
+      ansible.builtin.fail:
+        msg: "Ce playbook est destiné uniquement aux architectures x86_64 (AMD64)."
+      when: ansible_architecture != "x86_64"
+
+    - name: Obtenir l'adresse IP locale pour l'interface wlp5s0
+      shell: ip -o -4 addr show dev wlp5s0 | awk '{print $4}' | cut -d/ -f1
+      register: local_ip
+      delegate_to: localhost
+
+    - name: Afficher l'adresse IP récupérée
+      debug:
+        msg: "Adresse IP récupérée : {{ local_ip.stdout }}"
+
+    # -------------------
+    # Configuration Système
+    # -------------------
+
+    - name: Définir le fuseau horaire sur {{ timezone }}
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Générer les locales nécessaires
+      locale_gen:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ locales }}"
+
+    - name: Définir la locale par défaut
+      lineinfile:
+        dest: /etc/default/locale
+        regexp: '^LANG='
+        line: 'LANG="{{ locales[0] }}"'
+        state: present
+        
+    # -------------------
+    # Mise a jour Système
+    # -------------------
+
+    - name: Mise à jour du cache APT
+      apt:
+        update_cache: yes
+
+    # -------------------
+    # Configuration SSH
+    # -------------------
+
+    - name: Créer le répertoire sshd_config.d s'il n'existe pas
+      file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        mode: '0755'
+      become: true
+
+    - name: Créer un fichier vide sshd_config.d/custom_settings.conf s'il n'existe pas
+      file:
+        path: /etc/ssh/sshd_config.d/custom_settings.conf
+        state: touch
+        mode: '0644'
+      become: true
+
+    - name: Assurer les paramètres de sshd_config.d/custom_settings.conf
+      lineinfile:
+        dest: /etc/ssh/sshd_config.d/custom_settings.conf
+        regexp: '^#?\s*{{ item.key }}\b'
+        line: '{{ item.key }} {{ item.value }}'
+        state: present
+        backup: yes
+      loop: "{{ sshd_config_settings | default({}) | dict2items }}"
+      notify:
+        - Redémarrer ssh
+
+    - name: Assurer la présence et la décommentation de l'inclusion des fichiers de configuration SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf'
+        line: 'Include /etc/ssh/sshd_config.d/*.conf'
+        state: present
+        backup: yes
+      notify:
+        - Redémarrer ssh
+
+    - name: Créer le répertoire .ssh pour l'utilisateur host ssh
+      file:
+        path: "{{ user_home }}/.ssh"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0700'
+
+    - name: Copier la clé publique SSH de l'ordinateur local vers authorized_keys
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ lookup('file', '/home/adrien/.ssh/id_rsa.pub') }}"
+
+    # -------------------
+    # Configuration UFW
+    # -------------------
+
+    - name: Installer UFW
+      apt:
+        name: ufw
+        state: present
+        update_cache: yes
+
+    - name: UFW - Définir les politiques par défaut (entrantes)
+      ufw:
+        direction: incoming
+        policy: deny
+
+    - name: UFW - Définir les politiques par défaut (sortantes)
+      ufw:
+        direction: outgoing
+        policy: allow
+
+    - name: UFW - Autoriser SSH depuis des IP spécifiques
+      ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ item }}"
+        port: "{{ ssh_port }}"
+      loop: "{{ allowed_ssh_ips }}"
+
+    - name: UFW - Autoriser SSH depuis un plage d'adresses IP locales
+      ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ local_ip.stdout | trim }}"
+        port: "{{ ssh_port }}"
+
+
+    - name: UFW - Autoriser les ports entrants
+      ufw:
+        rule: allow
+        proto: "{{ item.proto }}"
+        port: "{{ item.port }}"
+        from_ip: "{{ item.from }}"
+      loop: "{{ ufw_allowed_ports }}"
+
+    - name: UFW - Activer le pare-feu
+      ansible.builtin.shell: echo y | ufw enable
+      become: yes
+
+    - name: UFW - Activer les logs, niveau medium
+      ansible.builtin.command: ufw logging medium
+      become: yes
+
+    # -------------------
+    # Installation de Rsyslog
+    # -------------------
+
+    - name: Installer Rsyslog
+      apt:
+        name: rsyslog
+        state: present
+        update_cache: yes
+
+    - name: Activer et démarrer Rsyslog
+      systemd:
+        name: rsyslog
+        enabled: true
+        state: started
+
+    # -------------------
+    # Configuration Fail2ban
+    # -------------------
+
+    - name: Installer Fail2ban
+      apt:
+        name: fail2ban
+        state: present
+        update_cache: yes
+
+    - name: Arrêter Fail2Ban temporairement
+      service:
+        name: fail2ban
+        state: stopped
+
+    - name: Sauvegarder le fichier sshd.conf de Fail2ban
+      copy:
+        src: /etc/fail2ban/filter.d/sshd.conf
+        dest: /etc/fail2ban/filter.d/sshd.conf.bak
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Créer un fichier de filtre personnalisé pour sshd
+      copy:
+        dest: /etc/fail2ban/filter.d/custom-sshd.conf
+        content: |
+          [Definition]
+          failregex = ^%(__prefix_line)sFailed \S+ for .* from <HOST>( via \S+)? port \d+ ssh2?$
+                      ^%(__prefix_line)sReceived disconnect from <HOST>: 11: \S+: \S+ \[preauth\]$
+                      ^%(__prefix_line)sConnection closed by <HOST> \[preauth\]$
+                      ^%(__prefix_line)sInvalid user .* from <HOST> port \d+$
+                      ^%(__prefix_line)sUser .+ from <HOST> not allowed because not listed in AllowUsers$
+                      ^%(__prefix_line)sUser .+ from <HOST> not allowed because listed in DenyUsers$
+                      ^%(__prefix_line)sConnection closed by authenticating user .* <HOST> port \d+ \[preauth\]$
+                      ^%(__prefix_line)s(?:error: PAM: )?Authentication (?:failure|failed) for .* from <HOST>(?: port \d+)?(?: ssh\d*)?$
+                      ^%(__prefix_line)sReceived disconnect from <HOST>: 3: .*: Auth fail$
+                      ^%(__prefix_line)sDisconnected from authenticating <HOST> port \d+ \: .*$
+          ignoreregex =
+      notify:
+        - Redémarrer fail2ban
+
+    - name: Créer un fichier de filtre personnalisé pour UFW
+      copy:
+        dest: /etc/fail2ban/filter.d/ufw.conf
+        content: |
+          [Definition]
+          failregex = ^.*?IN=.*?OUT=.*?SRC=<HOST>.*?DPT=(?!49166)\d+.*?$
+          ignoreregex =
+      notify:
+        - Redémarrer fail2ban
+
+    - name: Déployer la configuration jail.local pour Fail2ban
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          ignoreip = {{ ansible_default_ipv4.address }}
+          bantime = 1h
+          findtime = 10m
+          maxretry = 5
+          action = %(action_)s
+
+          [sshd]
+          enabled = true
+          port    = {{ ssh_port }}
+          filter  = sshd
+          logpath = /var/log/auth.log
+      notify:
+        - Redémarrer fail2ban
+
+    - name: Configurer Fail2ban jail.local pour ufw-blocked-ports
+      blockinfile:
+        path: /etc/fail2ban/jail.local
+        block: |
+          [ufw-blocked-ports]
+          enabled  = true
+          filter   = ufw
+          action   = ufw[name=UFW]
+          logpath  = /var/log/ufw.log
+          maxretry = 5
+          bantime  = 3600
+          findtime = 600
+      notify:
+        - Redémarrer fail2ban
+
+    - name: Créer un script de récapitulatif des configurations
+      ansible.builtin.copy:
+        dest: /usr/local/bin/setup_summary.sh
+        content: |
+          #!/bin/bash
+          echo "======================================"
+          echo "         Récapitulatif de Setup        "
+          echo "======================================"
+          echo ""
+          
+          echo "1. Packages Installés:"
+          dpkg -l | grep -E 'ufw|rsyslog|fail2ban|openssh-server'
+          echo ""
+          
+          echo "2. Configuration SSH (/etc/ssh/sshd_config):"
+          grep -E 'Port|PermitRootLogin|PubkeyAuthentication|PasswordAuthentication' /etc/ssh/sshd_config
+          echo ""
+
+          echo "2. Configuration SSH (/etc/ssh/sshd_config.d/*.conf):"
+          grep -E 'Port|PermitRootLogin|PubkeyAuthentication|PasswordAuthentication' /etc/ssh/sshd_config.d/*.conf
+          echo ""
+
+          echo "3. Règles UFW Actuelles:"
+          ufw status verbose
+          echo ""
+          
+          echo "4. Statut des Services:"
+          echo "   - SSH:"
+          systemctl status ssh | grep -E 'Active|Loaded'
+          echo "   - UFW:"
+          systemctl status ufw | grep -E 'Active|Loaded'
+          echo "   - Rsyslog:"
+          systemctl status rsyslog | grep -E 'Active|Loaded'
+          echo "   - Fail2ban:"
+          systemctl status fail2ban | grep -E 'Active|Loaded'
+          echo ""
+
+          echo "5. Derniers Logs des Services:"
+          echo "   - SSH (derniers 10 logs) :"
+          journalctl -u ssh -n 10
+          echo ""
+          echo "   - UFW (derniers 10 logs) :"
+          journalctl -u ufw -n 10
+          echo ""
+          echo "   - Rsyslog (derniers 10 logs) :"
+          journalctl -u rsyslog -n 10
+          echo ""
+          echo "   - Fail2ban (derniers 10 logs) :"
+          journalctl -u fail2ban -n 10
+          echo ""
+
+          echo "6. Fichiers Clés Créés ou Modifiés:"
+          echo "   - SSHD Configurations:"
+          ls -ltr /etc/ssh/sshd_config.d/ | tail -5
+          echo "   - Fail2ban Filters:"
+          ls -ltr /etc/fail2ban/filter.d/ | tail -5
+          echo ""
+          echo "   - custom-sshd.conf:"
+          cat /etc/fail2ban/filter.d/custom-sshd.conf
+          echo ""
+          echo "   - ufw.conf:"
+          cat /etc/fail2ban/filter.d/ufw.conf
+          echo ""
+          echo "   - Fail2ban Jails:"
+          cat /etc/fail2ban/jail.local
+          echo ""
+          echo "   - Fail2ban-client status:"
+          fail2ban-client status
+          echo ""
+          echo "   - Fail2ban-client status sshd:"
+          fail2ban-client status sshd
+          echo ""
+          echo "   - Fail2ban-client status ufw-blocked-ports:"
+          fail2ban-client status ufw-blocked-ports
+          echo ""
+
+          echo "7. Paramètres Système:"
+          echo "   - Timezone:"
+          timedatectl | grep "Time zone"
+          echo "   - Locales:"
+          locale
+          echo ""
+          echo "Affichage des repertoires/fichiers de configurations"
+          CONFIG_PATH=("/etc/ssh/sshd_config" "/etc/ssh/sshd_config.d/*.conf" "/etc/fail2ban/jail.local" "/etc/fail2ban/fail2ban.conf" "/etc/fail2ban/filter.d/sshd.conf" "/etc/fail2ban/filter.d/custom-sshd.conf" "/etc/fail2ban/filter.d/ufw.conf")
+          for l in ${CONFIG_PATH[@]}; do
+            echo "$l";
+          done
+          echo "Affichage des repertoires/fichiers logs"
+          LOGS_PATH=("/var/log/auth.log" "/var/log/fail2ban.log")
+          for l in ${LOGS_PATH[@]}; do
+            echo "$l";
+          done
+
+
+          echo "======================================"
+          echo "     Fin du Récapitulatif Setup        "
+          echo "======================================"
+        mode: '0755'
+      notify:
+        - Informer l'utilisateur de la création du script
+
+  handlers:
+    - name: Redémarrer ssh
+      service:
+        name: ssh
+        state: restarted
+
+    - name: Redémarrer fail2ban
+      service:
+        name: fail2ban
+        state: started
+
+    - name: Informer l'utilisateur de la création du script
+      debug:
+        msg: "Le script de récapitulatif a été créé à /usr/local/bin/setup_summary.sh. Vous pouvez l'exécuter avec sudo /usr/local/bin/setup_summary.sh"

@@ -1,0 +1,40 @@
+multi_vm:
+  hosts:
+    multi_vm:
+      ansible_host: 10.201.113.165
+      ansible_user: ubuntu
+      ansible_ssh_private_key_file: ~/.ssh/id_rsa
+hidora_vm:
+  hosts:
+    hidora_vm:
+      ansible_host: gate.hidora.net
+      ansible_user: 184500-8538
+      ansible_ssh_private_key_file: ~/.ssh/id_rsa
+      ansible_port: 3022
+dev_hidora:
+  hosts:
+    dev_hidora:
+      ansible_host: 91.200.144.227
+      ansible_user: dev
+      ansible_ssh_private_key_file: ~/.ssh/id_rsa
+      ansible_port: 2222
+debian_hidora:
+  hosts:
+    debian_hidora:
+      ansible_host: 185.34.102.202
+      ansible_user: dev
+      ansible_ssh_private_key_file: ~/.ssh/id_rsa
+      ansible_port: 22
+rpi:
+  hosts:
+    rpi:
+      ansible_host: 192.168.1.31
+      ansible_user: adrien
+      ansible_ssh_private_key_file: ~/.ssh/id_rsa
+      ansible_port: 22
+debian_v1:
+  hosts:
+    debian_v1:
+      ansible_host: 192.168.1.91
+      ansible_user: adrien
+      ansible_port: 22

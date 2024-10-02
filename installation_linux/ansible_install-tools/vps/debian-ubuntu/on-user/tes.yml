@@ -1,0 +1,7 @@
+- name: Configuration Fail2Ban
+  hosts: VM_DEB12_ADRIEN
+  become: true
+  tasks:
+    - name: Ajouter l'IP de l'hôte Ansible à ignoreip
+      debug:
+        msg: "{{ ansible_default_ipv4.address }}"
